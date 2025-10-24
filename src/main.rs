@@ -1,25 +1,14 @@
 #[macro_use] extern crate rocket;
 
 mod schema;
+mod db;
 
 use diesel::prelude::*;
 use diesel::sqlite::SqliteConnection;
 use rocket::serde::{Serialize, Deserialize, json::Json};
 use rocket::State;
 use rocket::http::Status;
-use dotenvy::dotenv;
-use std::env;
 use std::sync::Mutex;
-
-#[derive(Debug, Clone, Serialize, Deserialize, Queryable, Selectable)]
-#[diesel(table_name = schema::elus)]
-#[serde(crate = "rocket::serde")]
-struct PersonDB {
-    id: i32,
-    name: String,
-    email: String,
-    mandates: String,
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(crate = "rocket::serde")]
@@ -29,8 +18,8 @@ struct Person {
     mandates: Vec<String>,
 }
 
-impl From<PersonDB> for Person {
-    fn from(person: PersonDB) -> Self {
+impl From<db::Person> for Person {
+    fn from(person: db::Person) -> Self {
         let mandates: Vec<String> = serde_json::from_str(&person.mandates)
             .unwrap_or_else(|_| vec![]);
         Person {
@@ -41,23 +30,7 @@ impl From<PersonDB> for Person {
     }
 }
 
-#[derive(Insertable)]
-#[diesel(table_name = schema::elus)]
-struct NewPerson {
-    name: String,
-    email: String,
-    mandates: String,
-}
-
 type DbConn = Mutex<SqliteConnection>;
-
-fn establish_connection() -> SqliteConnection {
-    dotenv().ok();
-    let database_url = env::var("DATABASE_URL")
-        .expect("DATABASE_URL must be set");
-    SqliteConnection::establish(&database_url)
-        .unwrap_or_else(|_| panic!("Error connecting to {}", database_url))
-}
 
 #[get("/")]
 fn index() -> &'static str {
@@ -70,7 +43,7 @@ fn elus(db: &State<DbConn>) -> Json<Vec<Person>> {
 
     let mut connection = db.lock().unwrap();
     let results = elus
-        .select(PersonDB::as_select())
+        .select(db::Person::as_select())
         .load(&mut *connection)
         .expect("Error loading persons");
 
@@ -88,7 +61,7 @@ fn get_person_by_email(search_email: String, db: &State<DbConn>) -> Option<Json<
     let mut connection = db.lock().unwrap();
     let result = elus
         .filter(email.eq(&search_email))
-        .select(PersonDB::as_select())
+        .select(db::Person::as_select())
         .first(&mut *connection)
         .ok()?;
 
@@ -113,7 +86,7 @@ fn create_person(person_data: Json<Person>, db: &State<DbConn>) -> Result<Json<P
     // Check if email already exists
     let email_exists = elus
         .filter(email.eq(&person_data.email))
-        .select(PersonDB::as_select())
+        .select(db::Person::as_select())
         .first(&mut *connection)
         .is_ok();
 
@@ -124,7 +97,7 @@ fn create_person(person_data: Json<Person>, db: &State<DbConn>) -> Result<Json<P
     // Check if name already exists
     let name_exists = elus
         .filter(name.eq(&person_data.name))
-        .select(PersonDB::as_select())
+        .select(db::Person::as_select())
         .first(&mut *connection)
         .is_ok();
 
@@ -133,7 +106,7 @@ fn create_person(person_data: Json<Person>, db: &State<DbConn>) -> Result<Json<P
     }
 
     // Create new person
-    let new_person = NewPerson {
+    let new_person = db::NewPerson {
         name: person_data.name.clone(),
         email: person_data.email.clone(),
         mandates: serde_json::to_string(&person_data.mandates).unwrap(),
@@ -147,7 +120,7 @@ fn create_person(person_data: Json<Person>, db: &State<DbConn>) -> Result<Json<P
     // Return the created person
     let created = elus
         .filter(email.eq(&person_data.email))
-        .select(PersonDB::as_select())
+        .select(db::Person::as_select())
         .first(&mut *connection)
         .map_err(|_| Status::InternalServerError)?;
 
@@ -156,7 +129,7 @@ fn create_person(person_data: Json<Person>, db: &State<DbConn>) -> Result<Json<P
 
 #[launch]
 fn rocket() -> _ {
-    let connection = establish_connection();
+    let connection = db::establish_connection();
     rocket::build()
         .manage(Mutex::new(connection))
         .mount("/", routes![index, elus, get_person_by_email, create_person_new, create_person_create])
@@ -189,17 +162,17 @@ mod tests {
         use self::schema::elus;
 
         let persons = vec![
-            NewPerson {
+            db::NewPerson {
                 name: "Jean Dupont".to_string(),
                 email: "jean.dupont@example.com".to_string(),
                 mandates: serde_json::to_string(&vec!["Maire", "Conseiller régional"]).unwrap(),
             },
-            NewPerson {
+            db::NewPerson {
                 name: "Marie Martin".to_string(),
                 email: "marie.martin@example.com".to_string(),
                 mandates: serde_json::to_string(&vec!["Députée"]).unwrap(),
             },
-            NewPerson {
+            db::NewPerson {
                 name: "Pierre Durand".to_string(),
                 email: "pierre.durand@example.com".to_string(),
                 mandates: serde_json::to_string(&vec!["Sénateur", "Conseiller municipal"]).unwrap(),
