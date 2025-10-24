@@ -6,6 +6,7 @@ use diesel::prelude::*;
 use diesel::sqlite::SqliteConnection;
 use rocket::serde::{Serialize, Deserialize, json::Json};
 use rocket::State;
+use rocket::http::Status;
 use dotenvy::dotenv;
 use std::env;
 use std::sync::Mutex;
@@ -94,12 +95,71 @@ fn get_person_by_email(search_email: String, db: &State<DbConn>) -> Option<Json<
     Some(Json(PersonResponse::from(result)))
 }
 
+#[post("/elus/new", data = "<person_data>")]
+fn create_person_new(person_data: Json<PersonResponse>, db: &State<DbConn>) -> Result<Json<PersonResponse>, Status> {
+    create_person(person_data, db)
+}
+
+#[post("/elus/create", data = "<person_data>")]
+fn create_person_create(person_data: Json<PersonResponse>, db: &State<DbConn>) -> Result<Json<PersonResponse>, Status> {
+    create_person(person_data, db)
+}
+
+fn create_person(person_data: Json<PersonResponse>, db: &State<DbConn>) -> Result<Json<PersonResponse>, Status> {
+    use self::schema::elus::dsl::*;
+
+    let mut connection = db.lock().unwrap();
+
+    // Check if email already exists
+    let email_exists = elus
+        .filter(email.eq(&person_data.email))
+        .select(Person::as_select())
+        .first(&mut *connection)
+        .is_ok();
+
+    if email_exists {
+        return Err(Status::Conflict);
+    }
+
+    // Check if name already exists
+    let name_exists = elus
+        .filter(name.eq(&person_data.name))
+        .select(Person::as_select())
+        .first(&mut *connection)
+        .is_ok();
+
+    if name_exists {
+        return Err(Status::Conflict);
+    }
+
+    // Create new person
+    let new_person = NewPerson {
+        name: person_data.name.clone(),
+        email: person_data.email.clone(),
+        mandates: serde_json::to_string(&person_data.mandates).unwrap(),
+    };
+
+    diesel::insert_into(elus)
+        .values(&new_person)
+        .execute(&mut *connection)
+        .map_err(|_| Status::InternalServerError)?;
+
+    // Return the created person
+    let created = elus
+        .filter(email.eq(&person_data.email))
+        .select(Person::as_select())
+        .first(&mut *connection)
+        .map_err(|_| Status::InternalServerError)?;
+
+    Ok(Json(PersonResponse::from(created)))
+}
+
 #[launch]
 fn rocket() -> _ {
     let connection = establish_connection();
     rocket::build()
         .manage(Mutex::new(connection))
-        .mount("/", routes![index, elus, get_person_by_email])
+        .mount("/", routes![index, elus, get_person_by_email, create_person_new, create_person_create])
 }
 
 #[cfg(test)]
@@ -213,5 +273,112 @@ mod tests {
         // Test with non-existing email
         let response = client.get("/elus/nonexistent@example.com").dispatch();
         assert_eq!(response.status(), Status::NotFound);
+    }
+
+    #[test]
+    fn test_create_person_new() {
+        let connection = setup_test_db();
+        let rocket = rocket::build()
+            .manage(Mutex::new(connection))
+            .mount("/", routes![index, elus, get_person_by_email, create_person_new, create_person_create]);
+
+        let client = Client::tracked(rocket).expect("valid rocket instance");
+
+        let new_person = PersonResponse {
+            name: "Alice Wonderland".to_string(),
+            email: "alice@example.com".to_string(),
+            mandates: vec!["Conseillère".to_string()],
+        };
+
+        let response = client
+            .post("/elus/new")
+            .json(&new_person)
+            .dispatch();
+
+        assert_eq!(response.status(), Status::Ok);
+
+        let created: PersonResponse = response.into_json().expect("valid JSON");
+        assert_eq!(created.name, "Alice Wonderland");
+        assert_eq!(created.email, "alice@example.com");
+        assert_eq!(created.mandates.len(), 1);
+        assert_eq!(created.mandates[0], "Conseillère");
+    }
+
+    #[test]
+    fn test_create_person_create_alias() {
+        let connection = setup_test_db();
+        let rocket = rocket::build()
+            .manage(Mutex::new(connection))
+            .mount("/", routes![index, elus, get_person_by_email, create_person_new, create_person_create]);
+
+        let client = Client::tracked(rocket).expect("valid rocket instance");
+
+        let new_person = PersonResponse {
+            name: "Bob Builder".to_string(),
+            email: "bob@example.com".to_string(),
+            mandates: vec!["Architecte".to_string(), "Ingénieur".to_string()],
+        };
+
+        let response = client
+            .post("/elus/create")
+            .json(&new_person)
+            .dispatch();
+
+        assert_eq!(response.status(), Status::Ok);
+
+        let created: PersonResponse = response.into_json().expect("valid JSON");
+        assert_eq!(created.name, "Bob Builder");
+        assert_eq!(created.email, "bob@example.com");
+        assert_eq!(created.mandates.len(), 2);
+    }
+
+    #[test]
+    fn test_create_person_duplicate_email() {
+        let mut connection = setup_test_db();
+        insert_test_persons(&mut connection);
+
+        let rocket = rocket::build()
+            .manage(Mutex::new(connection))
+            .mount("/", routes![index, elus, get_person_by_email, create_person_new, create_person_create]);
+
+        let client = Client::tracked(rocket).expect("valid rocket instance");
+
+        let duplicate_email_person = PersonResponse {
+            name: "Different Name".to_string(),
+            email: "jean.dupont@example.com".to_string(),
+            mandates: vec!["Some mandate".to_string()],
+        };
+
+        let response = client
+            .post("/elus/new")
+            .json(&duplicate_email_person)
+            .dispatch();
+
+        assert_eq!(response.status(), Status::Conflict);
+    }
+
+    #[test]
+    fn test_create_person_duplicate_name() {
+        let mut connection = setup_test_db();
+        insert_test_persons(&mut connection);
+
+        let rocket = rocket::build()
+            .manage(Mutex::new(connection))
+            .mount("/", routes![index, elus, get_person_by_email, create_person_new, create_person_create]);
+
+        let client = Client::tracked(rocket).expect("valid rocket instance");
+
+        let duplicate_name_person = PersonResponse {
+            name: "Jean Dupont".to_string(),
+            email: "different.email@example.com".to_string(),
+            mandates: vec!["Some mandate".to_string()],
+        };
+
+        let response = client
+            .post("/elus/new")
+            .json(&duplicate_name_person)
+            .dispatch();
+
+        assert_eq!(response.status(), Status::Conflict);
     }
 }
