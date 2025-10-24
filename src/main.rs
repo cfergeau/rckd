@@ -14,7 +14,7 @@ use std::sync::Mutex;
 #[derive(Debug, Clone, Serialize, Deserialize, Queryable, Selectable)]
 #[diesel(table_name = schema::elus)]
 #[serde(crate = "rocket::serde")]
-struct Person {
+struct PersonDB {
     id: i32,
     name: String,
     email: String,
@@ -23,17 +23,17 @@ struct Person {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(crate = "rocket::serde")]
-struct PersonResponse {
+struct Person {
     name: String,
     email: String,
     mandates: Vec<String>,
 }
 
-impl From<Person> for PersonResponse {
-    fn from(person: Person) -> Self {
+impl From<PersonDB> for Person {
+    fn from(person: PersonDB) -> Self {
         let mandates: Vec<String> = serde_json::from_str(&person.mandates)
             .unwrap_or_else(|_| vec![]);
-        PersonResponse {
+        Person {
             name: person.name,
             email: person.email,
             mandates,
@@ -65,47 +65,47 @@ fn index() -> &'static str {
 }
 
 #[get("/elus")]
-fn elus(db: &State<DbConn>) -> Json<Vec<PersonResponse>> {
+fn elus(db: &State<DbConn>) -> Json<Vec<Person>> {
     use self::schema::elus::dsl::*;
 
     let mut connection = db.lock().unwrap();
     let results = elus
-        .select(Person::as_select())
+        .select(PersonDB::as_select())
         .load(&mut *connection)
         .expect("Error loading persons");
 
-    let responses: Vec<PersonResponse> = results.into_iter()
-        .map(PersonResponse::from)
+    let responses: Vec<Person> = results.into_iter()
+        .map(Person::from)
         .collect();
 
     Json(responses)
 }
 
 #[get("/elus/<search_email>")]
-fn get_person_by_email(search_email: String, db: &State<DbConn>) -> Option<Json<PersonResponse>> {
+fn get_person_by_email(search_email: String, db: &State<DbConn>) -> Option<Json<Person>> {
     use self::schema::elus::dsl::*;
 
     let mut connection = db.lock().unwrap();
     let result = elus
         .filter(email.eq(&search_email))
-        .select(Person::as_select())
+        .select(PersonDB::as_select())
         .first(&mut *connection)
         .ok()?;
 
-    Some(Json(PersonResponse::from(result)))
+    Some(Json(Person::from(result)))
 }
 
 #[post("/elus/new", data = "<person_data>")]
-fn create_person_new(person_data: Json<PersonResponse>, db: &State<DbConn>) -> Result<Json<PersonResponse>, Status> {
+fn create_person_new(person_data: Json<Person>, db: &State<DbConn>) -> Result<Json<Person>, Status> {
     create_person(person_data, db)
 }
 
 #[post("/elus/create", data = "<person_data>")]
-fn create_person_create(person_data: Json<PersonResponse>, db: &State<DbConn>) -> Result<Json<PersonResponse>, Status> {
+fn create_person_create(person_data: Json<Person>, db: &State<DbConn>) -> Result<Json<Person>, Status> {
     create_person(person_data, db)
 }
 
-fn create_person(person_data: Json<PersonResponse>, db: &State<DbConn>) -> Result<Json<PersonResponse>, Status> {
+fn create_person(person_data: Json<Person>, db: &State<DbConn>) -> Result<Json<Person>, Status> {
     use self::schema::elus::dsl::*;
 
     let mut connection = db.lock().unwrap();
@@ -113,7 +113,7 @@ fn create_person(person_data: Json<PersonResponse>, db: &State<DbConn>) -> Resul
     // Check if email already exists
     let email_exists = elus
         .filter(email.eq(&person_data.email))
-        .select(Person::as_select())
+        .select(PersonDB::as_select())
         .first(&mut *connection)
         .is_ok();
 
@@ -124,7 +124,7 @@ fn create_person(person_data: Json<PersonResponse>, db: &State<DbConn>) -> Resul
     // Check if name already exists
     let name_exists = elus
         .filter(name.eq(&person_data.name))
-        .select(Person::as_select())
+        .select(PersonDB::as_select())
         .first(&mut *connection)
         .is_ok();
 
@@ -147,11 +147,11 @@ fn create_person(person_data: Json<PersonResponse>, db: &State<DbConn>) -> Resul
     // Return the created person
     let created = elus
         .filter(email.eq(&person_data.email))
-        .select(Person::as_select())
+        .select(PersonDB::as_select())
         .first(&mut *connection)
         .map_err(|_| Status::InternalServerError)?;
 
-    Ok(Json(PersonResponse::from(created)))
+    Ok(Json(Person::from(created)))
 }
 
 #[launch]
@@ -240,7 +240,7 @@ mod tests {
 
         assert_eq!(response.status(), Status::Ok);
 
-        let returned_persons: Vec<PersonResponse> = response.into_json().expect("valid JSON");
+        let returned_persons: Vec<Person> = response.into_json().expect("valid JSON");
         assert_eq!(returned_persons.len(), 3);
         assert_eq!(returned_persons[0].name, "Jean Dupont");
         assert_eq!(returned_persons[0].email, "jean.dupont@example.com");
@@ -264,7 +264,7 @@ mod tests {
         let response = client.get("/elus/marie.martin@example.com").dispatch();
         assert_eq!(response.status(), Status::Ok);
 
-        let person: PersonResponse = response.into_json().expect("valid JSON");
+        let person: Person = response.into_json().expect("valid JSON");
         assert_eq!(person.name, "Marie Martin");
         assert_eq!(person.email, "marie.martin@example.com");
         assert_eq!(person.mandates.len(), 1);
@@ -284,7 +284,7 @@ mod tests {
 
         let client = Client::tracked(rocket).expect("valid rocket instance");
 
-        let new_person = PersonResponse {
+        let new_person = Person {
             name: "Alice Wonderland".to_string(),
             email: "alice@example.com".to_string(),
             mandates: vec!["Conseillère".to_string()],
@@ -297,7 +297,7 @@ mod tests {
 
         assert_eq!(response.status(), Status::Ok);
 
-        let created: PersonResponse = response.into_json().expect("valid JSON");
+        let created: Person = response.into_json().expect("valid JSON");
         assert_eq!(created.name, "Alice Wonderland");
         assert_eq!(created.email, "alice@example.com");
         assert_eq!(created.mandates.len(), 1);
@@ -313,7 +313,7 @@ mod tests {
 
         let client = Client::tracked(rocket).expect("valid rocket instance");
 
-        let new_person = PersonResponse {
+        let new_person = Person {
             name: "Bob Builder".to_string(),
             email: "bob@example.com".to_string(),
             mandates: vec!["Architecte".to_string(), "Ingénieur".to_string()],
@@ -326,7 +326,7 @@ mod tests {
 
         assert_eq!(response.status(), Status::Ok);
 
-        let created: PersonResponse = response.into_json().expect("valid JSON");
+        let created: Person = response.into_json().expect("valid JSON");
         assert_eq!(created.name, "Bob Builder");
         assert_eq!(created.email, "bob@example.com");
         assert_eq!(created.mandates.len(), 2);
@@ -343,7 +343,7 @@ mod tests {
 
         let client = Client::tracked(rocket).expect("valid rocket instance");
 
-        let duplicate_email_person = PersonResponse {
+        let duplicate_email_person = Person {
             name: "Different Name".to_string(),
             email: "jean.dupont@example.com".to_string(),
             mandates: vec!["Some mandate".to_string()],
@@ -368,7 +368,7 @@ mod tests {
 
         let client = Client::tracked(rocket).expect("valid rocket instance");
 
-        let duplicate_name_person = PersonResponse {
+        let duplicate_name_person = Person {
             name: "Jean Dupont".to_string(),
             email: "different.email@example.com".to_string(),
             mandates: vec!["Some mandate".to_string()],
