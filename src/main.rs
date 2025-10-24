@@ -38,34 +38,23 @@ fn index() -> &'static str {
 }
 
 #[get("/elus")]
-fn elus(db: &State<DbConn>) -> Json<Vec<Person>> {
-    use self::schema::elus::dsl::*;
-
+fn elus(db: &State<DbConn>) -> Result<Json<Vec<Person>>, Status> {
     let mut connection = db.lock().unwrap();
-    let results = elus
-        .select(db::Person::as_select())
-        .load(&mut *connection)
-        .expect("Error loading persons");
+    let results = db::elus(&mut connection)?;
 
     let responses: Vec<Person> = results.into_iter()
         .map(Person::from)
         .collect();
 
-    Json(responses)
+    Ok(Json(responses))
 }
 
 #[get("/elus/<search_email>")]
-fn get_person_by_email(search_email: String, db: &State<DbConn>) -> Option<Json<Person>> {
-    use self::schema::elus::dsl::*;
-
+fn get_person_by_email(search_email: String, db: &State<DbConn>) -> Result<Json<Person>, Status> {
     let mut connection = db.lock().unwrap();
-    let result = elus
-        .filter(email.eq(&search_email))
-        .select(db::Person::as_select())
-        .first(&mut *connection)
-        .ok()?;
+    let result = db::get_elu_by_email(&search_email, &mut connection)?;
 
-    Some(Json(Person::from(result)))
+    Ok(Json(Person::from(result)))
 }
 
 #[post("/elus/new", data = "<person_data>")]
@@ -79,50 +68,25 @@ fn create_person_create(person_data: Json<Person>, db: &State<DbConn>) -> Result
 }
 
 fn create_person(person_data: Json<Person>, db: &State<DbConn>) -> Result<Json<Person>, Status> {
-    use self::schema::elus::dsl::*;
-
     let mut connection = db.lock().unwrap();
 
-    // Check if email already exists
-    let email_exists = elus
-        .filter(email.eq(&person_data.email))
-        .select(db::Person::as_select())
-        .first(&mut *connection)
-        .is_ok();
-
-    if email_exists {
+    if db::email_exists(&person_data.email, &mut connection) {
         return Err(Status::Conflict);
     }
 
-    // Check if name already exists
-    let name_exists = elus
-        .filter(name.eq(&person_data.name))
-        .select(db::Person::as_select())
-        .first(&mut *connection)
-        .is_ok();
-
-    if name_exists {
+    if db::name_exists(&person_data.name, &mut connection) {
         return Err(Status::Conflict);
     }
 
-    // Create new person
-    let new_person = db::NewPerson {
-        name: person_data.name.clone(),
-        email: person_data.email.clone(),
-        mandates: serde_json::to_string(&person_data.mandates).unwrap(),
-    };
+    let mandates_json = serde_json::to_string(&person_data.mandates).unwrap();
+    db::insert_person(
+        person_data.name.clone(),
+        person_data.email.clone(),
+        mandates_json,
+        &mut connection
+    )?;
 
-    diesel::insert_into(elus)
-        .values(&new_person)
-        .execute(&mut *connection)
-        .map_err(|_| Status::InternalServerError)?;
-
-    // Return the created person
-    let created = elus
-        .filter(email.eq(&person_data.email))
-        .select(db::Person::as_select())
-        .first(&mut *connection)
-        .map_err(|_| Status::InternalServerError)?;
+    let created = db::get_elu_by_email(&person_data.email, &mut connection)?;
 
     Ok(Json(Person::from(created)))
 }
